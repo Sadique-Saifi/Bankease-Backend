@@ -1,0 +1,116 @@
+from rest_framework import status, generics
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+
+from apps.banking.models import BankAccount, AccountHolder, Beneficiary
+from apps.banking.serializers import (
+    BankAccountSerializer,
+    BankAccountCreateSerializer,
+    BeneficiarySerializer,
+)
+from apps.banking.services import create_bank_account_for_user
+from apps.notifications.models import AuditLog
+
+
+class BankAccountListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        if getattr(user, "role", None) == "BANK_OFFICER" or user.is_staff:
+            accounts = BankAccount.objects.all().prefetch_related("holders__user")
+        else:
+            accounts = BankAccount.objects.filter(holders__user=user).distinct().prefetch_related("holders__user")
+        
+        serializer = BankAccountSerializer(accounts, many=True)
+        return Response({"status": "success", "data": serializer.data})
+
+    def post(self, request):
+        serializer = BankAccountCreateSerializer(data=request.data)
+        if serializer.is_valid():
+            account = create_bank_account_for_user(
+                user=request.user,
+                account_type=serializer.validated_data["account_type"],
+                initial_deposit=serializer.validated_data["initial_deposit"],
+            )
+            return Response(
+                {
+                    "status": "success",
+                    "message": "Bank account opened successfully.",
+                    "data": BankAccountSerializer(account).data,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        return Response({"status": "error", "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BankAccountDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        user = request.user
+        try:
+            if getattr(user, "role", None) == "BANK_OFFICER" or user.is_staff:
+                account = BankAccount.objects.get(pk=pk)
+            else:
+                account = BankAccount.objects.get(pk=pk, holders__user=user)
+        except BankAccount.DoesNotExist:
+            return Response(
+                {"status": "error", "message": "Account not found or access denied."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = BankAccountSerializer(account)
+        return Response({"status": "success", "data": serializer.data})
+
+
+class BeneficiaryListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        beneficiaries = Beneficiary.objects.filter(owner_user=request.user, status=Beneficiary.Status.ACTIVE)
+        serializer = BeneficiarySerializer(beneficiaries, many=True)
+        return Response({"status": "success", "data": serializer.data})
+
+    def post(self, request):
+        serializer = BeneficiarySerializer(data=request.data, context={"request": request})
+        if serializer.is_valid():
+            beneficiary = serializer.save(owner_user=request.user)
+            AuditLog.objects.create(
+                actor=request.user,
+                action="BENEFICIARY_ADDED",
+                entity_type="BENEFICIARY",
+                entity_id=beneficiary.id,
+            )
+            return Response(
+                {
+                    "status": "success",
+                    "message": "Beneficiary registered successfully.",
+                    "data": serializer.data,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        return Response({"status": "error", "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BeneficiaryDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk):
+        try:
+            beneficiary = Beneficiary.objects.get(pk=pk, owner_user=request.user)
+            beneficiary.status = Beneficiary.Status.INACTIVE
+            beneficiary.save()
+            AuditLog.objects.create(
+                actor=request.user,
+                action="BENEFICIARY_REMOVED",
+                entity_type="BENEFICIARY",
+                entity_id=beneficiary.id,
+            )
+            return Response({"status": "success", "message": "Beneficiary deleted successfully."})
+        except Beneficiary.DoesNotExist:
+            return Response(
+                {"status": "error", "message": "Beneficiary not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
