@@ -38,6 +38,7 @@ class LoanApplicationSerializer(serializers.ModelSerializer):
     interest_rate = serializers.DecimalField(source="loan_product.interest_rate", max_digits=5, decimal_places=2, read_only=True)
     customer_name = serializers.CharField(source="customer.full_name", read_only=True)
     customer_number = serializers.CharField(source="customer.customer_number", read_only=True)
+    reviewed_by_name = serializers.SerializerMethodField()
     repayments = LoanRepaymentSerializer(many=True, read_only=True)
 
     class Meta:
@@ -54,10 +55,25 @@ class LoanApplicationSerializer(serializers.ModelSerializer):
             "duration_months",
             "application_status",
             "reviewed_by",
+            "reviewed_by_name",
+            "reviewed_at",
+            "rejection_reason",
+            "officer_remarks",
+            "verification_instructions",
+            "visit_location",
+            "appointment_date",
             "submitted_at",
             "repayments",
         ]
-        read_only_fields = ["id", "customer", "application_status", "reviewed_by", "submitted_at", "repayments"]
+        read_only_fields = [
+            "id", "customer", "application_status", "reviewed_by",
+            "reviewed_at", "submitted_at", "repayments",
+        ]
+
+    def get_reviewed_by_name(self, obj):
+        if obj.reviewed_by:
+            return obj.reviewed_by.get_full_name() or obj.reviewed_by.username
+        return None
 
 
 class LoanApplicationCreateSerializer(serializers.Serializer):
@@ -81,5 +97,24 @@ class LoanApplicationCreateSerializer(serializers.Serializer):
 
 
 class LoanReviewSerializer(serializers.Serializer):
-    action = serializers.ChoiceField(choices=["APPROVE", "REJECT"], required=True)
+    action = serializers.ChoiceField(
+        choices=["APPROVE", "REJECT", "VISIT_REQUIRED", "UNDER_REVIEW"],
+        required=True,
+    )
     notes = serializers.CharField(required=False, allow_blank=True, default="")
+    rejection_reason = serializers.CharField(required=False, allow_blank=True, default="")
+    verification_instructions = serializers.CharField(required=False, allow_blank=True, default="")
+    visit_location = serializers.CharField(required=False, allow_blank=True, default="")
+    appointment_date = serializers.DateTimeField(required=False, allow_null=True, default=None)
+    officer_remarks = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        if attrs["action"] == "REJECT" and not attrs.get("rejection_reason", "").strip():
+            raise serializers.ValidationError(
+                {"rejection_reason": "A rejection reason is required when rejecting."}
+            )
+        if attrs["action"] == "VISIT_REQUIRED" and not attrs.get("verification_instructions", "").strip():
+            raise serializers.ValidationError(
+                {"verification_instructions": "Verification instructions are required for in-person visit requests."}
+            )
+        return attrs

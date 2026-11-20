@@ -2,6 +2,7 @@ import datetime
 from decimal import Decimal
 from django.db import transaction
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 
 from apps.loans.models import LoanApplication, LoanRepayment
 from apps.banking.models import BankAccount
@@ -20,6 +21,32 @@ def add_months(sourcedate, months):
 
 
 class LoanService:
+    # Valid status transitions
+    VALID_TRANSITIONS = {
+        "APPROVE": [
+            LoanApplication.ApplicationStatus.PENDING_REVIEW,
+            LoanApplication.ApplicationStatus.PENDING,
+            LoanApplication.ApplicationStatus.UNDER_REVIEW,
+            LoanApplication.ApplicationStatus.VISIT_REQUIRED,
+        ],
+        "REJECT": [
+            LoanApplication.ApplicationStatus.PENDING_REVIEW,
+            LoanApplication.ApplicationStatus.PENDING,
+            LoanApplication.ApplicationStatus.UNDER_REVIEW,
+            LoanApplication.ApplicationStatus.VISIT_REQUIRED,
+        ],
+        "VISIT_REQUIRED": [
+            LoanApplication.ApplicationStatus.PENDING_REVIEW,
+            LoanApplication.ApplicationStatus.PENDING,
+            LoanApplication.ApplicationStatus.UNDER_REVIEW,
+        ],
+        "UNDER_REVIEW": [
+            LoanApplication.ApplicationStatus.PENDING_REVIEW,
+            LoanApplication.ApplicationStatus.PENDING,
+            LoanApplication.ApplicationStatus.VISIT_REQUIRED,
+        ],
+    }
+
     @staticmethod
     def calculate_monthly_installment(principal, annual_interest_rate, duration_months):
         """Calculates monthly EMI based on standard formula."""
@@ -34,17 +61,25 @@ class LoanService:
         return Decimal(f"{emi:.2f}")
 
     @staticmethod
-    def approve_loan(officer_user, loan_application_id, approve=True):
+    def review_loan(officer_user, loan_application_id, action,
+                    rejection_reason="", officer_remarks="",
+                    verification_instructions="", visit_location="",
+                    appointment_date=None):
+        """Enhanced loan review supporting APPROVE, REJECT, VISIT_REQUIRED, UNDER_REVIEW."""
         with transaction.atomic():
             application = LoanApplication.objects.select_for_update().get(id=loan_application_id)
-            if application.application_status not in [
-                LoanApplication.ApplicationStatus.PENDING,
-                LoanApplication.ApplicationStatus.UNDER_REVIEW,
-            ]:
-                raise ValidationError(f"Application cannot be updated from status {application.application_status}.")
+
+            valid_from = LoanService.VALID_TRANSITIONS.get(action, [])
+            if application.application_status not in valid_from:
+                raise ValidationError(
+                    f"Cannot perform '{action}' on application with status '{application.application_status}'."
+                )
 
             application.reviewed_by = officer_user
-            if approve:
+            application.reviewed_at = timezone.now()
+            application.officer_remarks = officer_remarks
+
+            if action == "APPROVE":
                 application.application_status = LoanApplication.ApplicationStatus.APPROVED
                 application.save()
 
@@ -66,31 +101,30 @@ class LoanService:
                         payment_status=LoanRepayment.PaymentStatus.PENDING,
                     )
 
-                # Send notification to customer
                 Notification.objects.create(
                     user=application.customer.user,
                     title="Loan Application Approved!",
                     message=f"Congratulations! Your application for {application.loan_product.product_name} of ₹{application.requested_amount:,.2f} has been approved. Monthly EMI: ₹{monthly_emi:,.2f}.",
                     notification_type=Notification.NotificationType.LOAN,
                 )
-
                 AuditLog.objects.create(
                     actor=officer_user,
                     action="LOAN_APPROVED",
                     entity_type="LOAN_APPLICATION",
                     entity_id=application.id,
                 )
-            else:
+
+            elif action == "REJECT":
                 application.application_status = LoanApplication.ApplicationStatus.REJECTED
+                application.rejection_reason = rejection_reason
                 application.save()
 
                 Notification.objects.create(
                     user=application.customer.user,
                     title="Loan Application Update",
-                    message=f"We regret to inform you that your loan application for {application.loan_product.product_name} was not approved at this time.",
+                    message=f"We regret to inform you that your loan application for {application.loan_product.product_name} was not approved. Reason: {rejection_reason}",
                     notification_type=Notification.NotificationType.LOAN,
                 )
-
                 AuditLog.objects.create(
                     actor=officer_user,
                     action="LOAN_REJECTED",
@@ -98,7 +132,62 @@ class LoanService:
                     entity_id=application.id,
                 )
 
+            elif action == "VISIT_REQUIRED":
+                application.application_status = LoanApplication.ApplicationStatus.VISIT_REQUIRED
+                application.verification_instructions = verification_instructions
+                application.visit_location = visit_location
+                application.appointment_date = appointment_date
+                application.save()
+
+                visit_msg = f"Your loan application for {application.loan_product.product_name} requires an in-person verification visit."
+                if visit_location:
+                    visit_msg += f" Please visit: {visit_location}."
+                if appointment_date:
+                    visit_msg += f" Suggested date: {appointment_date.strftime('%d %b %Y, %I:%M %p')}."
+                if verification_instructions:
+                    visit_msg += f" Instructions: {verification_instructions}"
+
+                Notification.objects.create(
+                    user=application.customer.user,
+                    title="In-Person Verification Required",
+                    message=visit_msg,
+                    notification_type=Notification.NotificationType.LOAN,
+                )
+                AuditLog.objects.create(
+                    actor=officer_user,
+                    action="LOAN_VISIT_REQUIRED",
+                    entity_type="LOAN_APPLICATION",
+                    entity_id=application.id,
+                )
+
+            elif action == "UNDER_REVIEW":
+                application.application_status = LoanApplication.ApplicationStatus.UNDER_REVIEW
+                application.save()
+
+                Notification.objects.create(
+                    user=application.customer.user,
+                    title="Loan Application Under Review",
+                    message=f"Your loan application for {application.loan_product.product_name} is now under active review by our officer.",
+                    notification_type=Notification.NotificationType.LOAN,
+                )
+                AuditLog.objects.create(
+                    actor=officer_user,
+                    action="LOAN_UNDER_REVIEW",
+                    entity_type="LOAN_APPLICATION",
+                    entity_id=application.id,
+                )
+
             return application
+
+    @staticmethod
+    def approve_loan(officer_user, loan_application_id, approve=True):
+        """Backward-compatible wrapper."""
+        action = "APPROVE" if approve else "REJECT"
+        return LoanService.review_loan(
+            officer_user=officer_user,
+            loan_application_id=loan_application_id,
+            action=action,
+        )
 
     @staticmethod
     def pay_repayment(user, repayment_id, account_id):

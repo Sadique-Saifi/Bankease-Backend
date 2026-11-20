@@ -10,10 +10,12 @@ from rest_framework.pagination import PageNumberPagination
 from apps.notifications.models import Notification, AuditLog
 from apps.notifications.serializers import NotificationSerializer, AuditLogSerializer
 from apps.accounts.models import User, CustomerProfile
-from apps.banking.models import BankAccount
+from apps.banking.models import BankAccount, AccountOpeningRequest
+from apps.banking.serializers import AccountOpeningRequestSerializer
 from apps.transactions.models import FinancialTransaction, LedgerEntry
 from apps.transactions.serializers import FinancialTransactionSerializer
 from apps.loans.models import LoanApplication, LoanRepayment
+from apps.loans.serializers import LoanApplicationSerializer
 from apps.investments.models import InvestmentHolding
 from apps.support.models import SupportTicket
 from apps.accounts.permissions import IsBankOfficer
@@ -114,9 +116,17 @@ class CustomerDashboardView(APIView):
         pending_loans = 0
         active_loans = 0
         next_due_repayment = None
+        loan_applications = []
         if hasattr(user, "customer_profile"):
+            # Count using both old PENDING and new PENDING_REVIEW for compat
             pending_loans = LoanApplication.objects.filter(
-                customer=user.customer_profile, application_status=LoanApplication.ApplicationStatus.PENDING
+                customer=user.customer_profile,
+                application_status__in=[
+                    LoanApplication.ApplicationStatus.PENDING_REVIEW,
+                    LoanApplication.ApplicationStatus.PENDING,
+                    LoanApplication.ApplicationStatus.UNDER_REVIEW,
+                    LoanApplication.ApplicationStatus.VISIT_REQUIRED,
+                ]
             ).count()
             active_loans = LoanApplication.objects.filter(
                 customer=user.customer_profile, application_status=LoanApplication.ApplicationStatus.APPROVED
@@ -136,6 +146,12 @@ class CustomerDashboardView(APIView):
                     "due_date": next_due_repayment_obj.due_date,
                 }
 
+            # Get recent loan applications for dashboard
+            loan_apps = LoanApplication.objects.filter(
+                customer=user.customer_profile
+            ).select_related("loan_product", "reviewed_by").order_by("-submitted_at")[:5]
+            loan_applications = LoanApplicationSerializer(loan_apps, many=True).data
+
         # Investment Summary
         total_invested = Decimal("0.00")
         total_holdings = 0
@@ -146,6 +162,12 @@ class CustomerDashboardView(APIView):
 
         # Unread notifications
         unread_notifs = Notification.objects.filter(user=user, is_read=False).count()
+
+        # Account Opening Requests
+        account_requests = AccountOpeningRequest.objects.filter(
+            requested_by=user
+        ).select_related("reviewed_by", "created_account").order_by("-created_at")[:5]
+        account_requests_data = AccountOpeningRequestSerializer(account_requests, many=True).data
 
         return Response({
             "status": "success",
@@ -160,11 +182,13 @@ class CustomerDashboardView(APIView):
                     "active_loans": active_loans,
                     "next_due_repayment": next_due_repayment,
                 },
+                "loan_applications": loan_applications,
                 "investment_summary": {
                     "holdings_count": total_holdings,
                     "total_invested": total_invested,
                 },
                 "unread_notifications": unread_notifs,
+                "account_opening_requests": account_requests_data,
             },
         })
 
@@ -177,8 +201,20 @@ class OfficerDashboardView(APIView):
         total_accounts = BankAccount.objects.count()
         total_deposits = BankAccount.objects.aggregate(total=Sum("balance"))["total"] or Decimal("0.00")
 
+        # Pending account opening requests
+        pending_account_requests = AccountOpeningRequest.objects.filter(
+            status=AccountOpeningRequest.RequestStatus.PENDING_REVIEW
+        ).count()
+
+        # Loan stats - include both old PENDING and new PENDING_REVIEW
         pending_loans = LoanApplication.objects.filter(
-            application_status=LoanApplication.ApplicationStatus.PENDING
+            application_status__in=[
+                LoanApplication.ApplicationStatus.PENDING_REVIEW,
+                LoanApplication.ApplicationStatus.PENDING,
+            ]
+        ).count()
+        visit_required_loans = LoanApplication.objects.filter(
+            application_status=LoanApplication.ApplicationStatus.VISIT_REQUIRED,
         ).count()
 
         open_tickets = SupportTicket.objects.filter(
@@ -192,16 +228,37 @@ class OfficerDashboardView(APIView):
 
         recent_audits = AuditLog.objects.all().select_related("actor")[:10]
 
+        # Pending account requests list (latest 10)
+        pending_acct_reqs = AccountOpeningRequest.objects.filter(
+            status=AccountOpeningRequest.RequestStatus.PENDING_REVIEW
+        ).select_related("requested_by", "reviewed_by").order_by("-created_at")[:10]
+        pending_acct_reqs_data = AccountOpeningRequestSerializer(pending_acct_reqs, many=True).data
+
+        # Pending loan applications list (latest 10)
+        pending_loan_apps = LoanApplication.objects.filter(
+            application_status__in=[
+                LoanApplication.ApplicationStatus.PENDING_REVIEW,
+                LoanApplication.ApplicationStatus.PENDING,
+                LoanApplication.ApplicationStatus.UNDER_REVIEW,
+                LoanApplication.ApplicationStatus.VISIT_REQUIRED,
+            ]
+        ).select_related("customer", "loan_product", "reviewed_by").order_by("-submitted_at")[:10]
+        pending_loan_apps_data = LoanApplicationSerializer(pending_loan_apps, many=True).data
+
         return Response({
             "status": "success",
             "data": {
                 "total_customers": total_customers,
                 "total_accounts": total_accounts,
                 "total_deposits": total_deposits,
+                "pending_account_requests": pending_account_requests,
                 "pending_loans": pending_loans,
+                "visit_required_loans": visit_required_loans,
                 "open_tickets": open_tickets,
                 "transactions_today_count": total_txns_today,
                 "transactions_today_volume": volume_today,
                 "recent_audits": AuditLogSerializer(recent_audits, many=True).data,
+                "pending_account_requests_list": pending_acct_reqs_data,
+                "pending_loan_applications_list": pending_loan_apps_data,
             },
         })

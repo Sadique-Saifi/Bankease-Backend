@@ -26,11 +26,14 @@ class LoanApplication(models.Model):
     """
 
     class ApplicationStatus(models.TextChoices):
-        PENDING = "PENDING", "Pending"
+        PENDING_REVIEW = "PENDING_REVIEW", "Pending Review"
         UNDER_REVIEW = "UNDER_REVIEW", "Under Review"
         APPROVED = "APPROVED", "Approved"
         REJECTED = "REJECTED", "Rejected"
+        VISIT_REQUIRED = "VISIT_REQUIRED", "Visit Required"
         DISBURSED = "DISBURSED", "Disbursed"
+        # Keep PENDING for backward compat with existing data
+        PENDING = "PENDING", "Pending"
 
     customer = models.ForeignKey(
         "accounts.CustomerProfile",
@@ -47,7 +50,7 @@ class LoanApplication(models.Model):
     application_status = models.CharField(
         max_length=20,
         choices=ApplicationStatus.choices,
-        default=ApplicationStatus.PENDING,
+        default=ApplicationStatus.PENDING_REVIEW,
     )
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -56,6 +59,12 @@ class LoanApplication(models.Model):
         null=True,
         blank=True,
     )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, default="")
+    officer_remarks = models.TextField(blank=True, default="")
+    verification_instructions = models.TextField(blank=True, default="")
+    visit_location = models.CharField(max_length=300, blank=True, default="")
+    appointment_date = models.DateTimeField(null=True, blank=True)
     submitted_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

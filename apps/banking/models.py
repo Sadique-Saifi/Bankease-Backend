@@ -109,3 +109,56 @@ class Beneficiary(models.Model):
 
     def __str__(self):
         return f"{self.beneficiary_name} ({self.beneficiary_account_number})"
+
+
+class AccountOpeningRequest(models.Model):
+    """
+    Tracks account-opening requests that require officer approval.
+    """
+
+    class RequestStatus(models.TextChoices):
+        PENDING_REVIEW = "PENDING_REVIEW", "Pending Review"
+        APPROVED = "APPROVED", "Approved"
+        REJECTED = "REJECTED", "Rejected"
+
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="account_opening_requests",
+    )
+    account_type = models.CharField(
+        max_length=20,
+        choices=BankAccount.AccountType.choices,
+        default=BankAccount.AccountType.SAVINGS,
+    )
+    initial_deposit = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    status = models.CharField(
+        max_length=20,
+        choices=RequestStatus.choices,
+        default=RequestStatus.PENDING_REVIEW,
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="reviewed_account_requests",
+        null=True,
+        blank=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, default="")
+    officer_remarks = models.TextField(blank=True, default="")
+    created_account = models.ForeignKey(
+        BankAccount,
+        on_delete=models.SET_NULL,
+        related_name="opening_request",
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "account_opening_request"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Request #{self.pk} by {self.requested_by} - {self.status}"
